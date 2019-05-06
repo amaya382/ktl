@@ -74,7 +74,7 @@ CURRENT   NAME       CLUSTER    AUTHINFO   NAMESPACE
 $ ktl use ctx minikube
 ```
 
-If you have `fzf`, can choice a context interactively
+If you have `fzf`, can choose a context interactively
 ```
 $ ktl use ctx
 ```
@@ -94,7 +94,7 @@ Context "minikube" modified.
 Active namespace is "kube-system".
 ```
 
-If you have `fzf`, can choice a namespace interactively
+If you have `fzf`, can choose a namespace interactively
 ```
 $ ktl use ns
 ```
