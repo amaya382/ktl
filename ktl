@@ -1,0 +1,514 @@
+#!/bin/bash
+
+args=("$@")
+
+FZF="fzf-tmux --ansi --tac --header-lines=1 -u 85%"
+
+exit_err() {
+   echo >&2 "${1}"
+   exit 1
+}
+
+current_context() {
+  $KUBECTL config view -o=jsonpath='{.current-context}'
+}
+
+get_contexts() {
+  $KUBECTL config get-contexts -o=name | sort -n
+}
+
+list_contexts() {
+  $KUBECTL config get-contexts
+}
+
+read_context() {
+  if [[ -f "${KUBECTX}" ]]; then
+    cat "${KUBECTX}"
+  fi
+}
+
+save_context() {
+  local saved
+  saved="$(read_context)"
+
+  if [[ "${saved}" != "${1}" ]]; then
+    printf %s "${1}" > "${KUBECTX}"
+  fi
+}
+
+switch_context() {
+  $KUBECTL config use-context "${1}"
+}
+
+choose_context_interactive() {
+  local choice
+  choice="$(list_contexts | ${FZF} | sed -e 's/.\+ \([a-z\-]\+\) .\+/\1/' || true)"
+  if [[ -z "${choice}" ]]; then
+    echo 2>&1 "error: you did not choose any of the options"
+    exit 1
+  else
+    echo $choice
+    #set_context "${choice}"
+  fi
+}
+
+set_context() {
+  local prev
+  prev="$(current_context)" || exit_err "error getting current context"
+
+  switch_context "${1}"
+
+  if [[ "${prev}" != "${1}" ]]; then
+    save_context "${prev}"
+  fi
+}
+
+swap_context() {
+  local ctx
+  ctx="$(read_context)"
+  if [[ -z "${ctx}" ]]; then
+    echo "error: No previous context found." >&2
+    exit 1
+  fi
+  set_context "${ctx}"
+}
+
+context_exists() {
+  grep -q ^"${1}"\$ <($KUBECTL config get-contexts -o=name)
+}
+
+rename_context() {
+  local old_name="${1}"
+  local new_name="${2}"
+
+  if [[ "${old_name}" == "." ]]; then
+    old_name="$(current_context)"
+  fi
+
+  if context_exists "${new_name}"; then
+    echo "Context \"${new_name}\" exists, deleting..." >&2
+    $KUBECTL config delete-context "${new_name}" 1>/dev/null 2>&1
+  fi
+
+  $KUBECTL config rename-context "${old_name}" "${new_name}"
+}
+
+delete_contexts() {
+  for i in "${@}"; do
+    delete_context "${i}"
+  done
+}
+
+delete_context() {
+  local ctx
+  ctx="${1}"
+  if [[ "${ctx}" == "." ]]; then
+    ctx="$(current_context)" || exit_err "error getting current context"
+  fi
+  echo "Deleting context \"${ctx}\"..." >&2
+  $KUBECTL config delete-context "${ctx}"
+}
+
+current_namespace() {
+  local cur_ctx
+
+  cur_ctx="$(current_context)" || exit_err "error getting current context"
+  ns="$($KUBECTL config view -o=jsonpath="{.contexts[?(@.name==\"${cur_ctx}\")].context.namespace}")" \
+     || exit_err "error getting current namespace"
+
+  if [[ -z "${ns}" ]]; then
+    echo "default"
+  else
+    echo "${ns}"
+  fi
+}
+
+get_namespaces() {
+  $KUBECTL get namespaces -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}'
+}
+
+escape_context_name() {
+  echo "${1//\//-}"
+}
+
+namespace_file() {
+  local ctx="$(escape_context_name "${1}")"
+  echo "${KUBENS_DIR}/${ctx}"
+}
+
+read_namespace() {
+  local f
+  f="$(namespace_file "${1}")"
+  [[ -f "${f}" ]] && cat "${f}"
+  return 0
+}
+
+save_namespace() {
+  mkdir -p "${KUBENS_DIR}"
+  local f saved
+  f="$(namespace_file "${1}")"
+  saved="$(read_namespace "${1}")"
+
+  if [[ "${saved}" != "${2}" ]]; then
+    printf %s "${2}" > "${f}"
+  fi
+}
+
+switch_namespace() {
+  local ctx="${1}"
+  $KUBECTL config set-context "${ctx}" --namespace="${2}"
+  echo "Active namespace is \"${2}\".">&2
+}
+
+choose_namespace_interactive() {
+  listed_namespaces="$(list_namespaces)"
+  if [ -z "${listed_namespaces}" ]; then
+    echo >&2 "error: could not list namespaces (is the cluster accessible?)"
+    exit 1
+  fi
+
+  local choice
+  choice="$(echo -e "${listed_namespaces}" | ${FZF} | sed -e 's/.\+ \([a-z\-]\+\) .\+/\1/' || true)"
+  if [[ -z "${choice}" ]]; then
+    echo 2>&1 "error: you did not choose any of the options"
+    exit 1
+  else
+    set_namespace "${choice}"
+  fi
+}
+
+set_namespace() {
+  local ctx prev
+  ctx="$(current_context)" || exit_err "error getting current context"
+  prev="$(current_namespace)" || exit_error "error getting current namespace"
+
+  if grep -q ^"${1}"\$ <(get_namespaces); then
+    switch_namespace "${ctx}" "${1}"
+
+    if [[ "${prev}" != "${1}" ]]; then
+      save_namespace "${ctx}" "${prev}"
+    fi
+  else
+    echo "error: no namespace exists with name \"${1}\".">&2
+    exit 1
+  fi
+}
+
+list_namespaces() {
+  curr_ns="$(current_namespace)"
+  ns_list="$($KUBECTL get namespaces)"
+  echo "${ns_list}" | head -1 | sed \
+    -e 's/^NAME/CURRENT   NAME/'
+  echo "${ns_list}" | tail +2 | sed \
+    -e "/^${curr_ns}/!s/^/          /" \
+    -e "/^${curr_ns}/s/^/*         /"
+}
+
+swap_namespace() {
+  local ctx ns
+  ctx="$(current_context)" || exit_err "error getting current context"
+  ns="$(read_namespace "${ctx}")"
+  if [[ -z "${ns}" ]]; then
+    echo "error: No previous namespace found for current context." >&2
+    exit 1
+  fi
+  set_namespace "${ns}"
+}
+
+get_labels() {
+  $KUBECTL get $1 $2 -o=jsonpath='{.metadata.labels}' \
+  | sed \
+    -e 's/:/=/g' \
+    -e 's/ /,/g' \
+    -e 's/^map\[//g' \
+    -e 's/\]$//g'
+}
+
+get_selector() {
+  ret=$($KUBECTL get $1 $2 -o=jsonpath='{.spec.selector.matchLabels}' \
+  | sed \
+    -e 's/:/=/g' \
+    -e 's/ /,/g' \
+    -e 's/^map\[//g' \
+    -e 's/\]$//g')
+  if [ "$ret" != "" ]; then
+    echo $ret
+  else
+    $KUBECTL get $1 $2 -o=jsonpath='{.spec.selector}' \
+    | sed \
+      -e 's/:/=/g' \
+      -e 's/ /,/g' \
+      -e 's/^map\[//g' \
+      -e 's/\]$//g'
+  fi
+}
+
+siblings_of() {
+  labels=$(get_labels $1 $2)
+  $KUBECTL get $1 -l=${labels}
+}
+
+get_child_type() {
+  local child_type
+  if $(is_svc_cmd $1); then
+    child_type="deployment"
+  elif $(is_deploy_cmd $1); then
+    # TMP: Don't care about replicationcontroller
+    child_type="replicaset"
+  elif $(is_rs_cmd $1); then
+    child_type="pod"
+  fi
+  echo ${child_type}
+}
+
+get_parent_type() {
+  local parent_type
+  if $(is_deploy_cmd $1); then
+    parent_type="service"
+  elif $(is_rs_cmd $1); then
+    parent_type="deployment"
+  elif $(is_po_cmd $1); then
+    # TMP: Don't care about replicationcontroller
+    parent_type="replicaset"
+  fi
+  echo ${parent_type}
+}
+
+parents_of() {
+  local parent_type
+  local parent_id
+  if $(is_po_cmd $1) || $(is_rs_cmd $1); then
+    parent=$($KUBECTL describe $1 $2 | grep -oP '^Control.+:\s+.+\/(.+)')
+    parent_type=$(normalize_type $(echo ${parent} | sed -e 's!^.\+: \(.\+\)/.\+$!\1!'))
+    parent_id=$(normalize_id $(echo ${parent} | sed -e 's!^.\+/\(.\+\)$!\1!'))
+  elif $(is_deploy_cmd $1); then
+    parent_type=$(get_parent_type $1)
+    # TODO: Get all parent items and then emulate their selector?
+    exit_err "\"parent\" for deployment is not implemented"
+  else
+    exit_err "\"parent\" for $1 is not implemented"
+  fi
+
+  $KUBECTL get "${parent_type}" "${parent_id}"
+}
+
+children_of() {
+  labels=$(get_selector $1 $2)
+  child_type=$(get_child_type $1)
+  $KUBECTL get ${child_type} -l=${labels}
+}
+
+rec_children_of() {
+  local labels=$(get_selector $1 $2)
+  local child_type=$(get_child_type $1)
+  local children=($($KUBECTL get ${child_type} -l=${labels} --no-headers=true | cut -f1 -d' ' | xargs))
+
+  local pad=''
+  for i in $(seq 0 $3); do
+    pad="${pad}  "
+  done
+  local grandchild_type=$(get_child_type ${child_type})
+  for child in "${children[@]}"; do
+    echo "${pad}${child_type}/${child}"
+    if [ "${grandchild_type}" != "" ]; then
+      rec_children_of ${child_type} ${child} $(($3+1))
+    fi
+  done
+}
+
+normalize_type() {
+  # po -> pod
+  # po/nginx -> pod
+  arg=$(echo "$1" | sed -e 's!/.*!!' | tr '[:upper:]' '[:lower:]')
+  case "${arg}" in
+    'services' | 'service' | 'svc')
+      echo 'service';;
+    'ingresses' | 'ingress' | 'ing')
+      echo 'ingress';;
+    'deployments' | 'deployment' | 'deploy')
+      echo 'deployment';;
+    'replicasets' | 'replicaset' | 'rs')
+      echo 'replicaset';;
+    'replicationcontrollers' | 'replicationcontroller' | 'rc')
+      echo 'replicationcontroller';;
+    'pods' | 'pod' | 'po')
+      echo 'pod';;
+    # Extra resource types and aliases
+    'contexts' | 'context' | 'ctx')
+      echo 'context';;
+    'namespaces' | 'namespace' | 'ns')
+      echo 'namespace';;
+    'dep')
+      echo 'deployment';;
+    *)
+      # TODO: Other resources
+      echo "${arg}"
+      exit 1;;
+  esac
+}
+
+normalize_id() {
+  # nginx -> nginx
+  # po/nginx -> nginx
+  echo "$1" | sed -e 's!.*/!!'
+}
+
+normalize() {
+  # po nginx -> pod nginx
+  # po/nginx -> pod nginx
+  local cmd
+  local id
+  if [[ "$1" =~ ^.+\/.+$ && $# -eq 1 ]]; then
+    cmd=$(normalize_type $(echo $1 | cut -f1 -d'/'))
+    id=$(normalize_id $(echo $1 | cut -f2 -d'/'))
+  elif [[ "$1" != '' && "$2" != '' ]]; then
+    cmd=$(normalize_type $1)
+    id=$(normalize_id $2)
+  elif [[ "$1" != '' ]]; then
+    cmd=$(normalize_type $1)
+    id=''
+  fi
+  echo "${cmd}" "${id}"
+}
+
+child() {
+  args=($(normalize $1 $2))
+  children_of "${args[0]}" "${args[1]}"
+}
+
+parent() {
+  args=($(normalize $1 $2))
+  parents_of "${args[0]}" "${args[1]}"
+}
+
+tree() {
+  args=($(normalize $1 $2))
+  echo "${args[0]}"/"${args[1]}"
+  rec_children_of "${args[0]}" "${args[1]}" 0
+}
+
+is_svc_cmd() {
+  [ "$1" = "services" -o "$1" = "service" -o "$1" = "svc" ]
+}
+
+is_deploy_cmd() {
+  [ "$1" = "deployments" -o "$1" = "deployment" -o "$1" = "deploy" ]
+}
+
+is_rs_cmd() {
+  [ "$1" = "replicasets" -o "$1" = "replicaset" -o "$1" = "rs" ]
+}
+
+is_po_cmd() {
+  [ "$1" = "pods" -o "$1" = "pod" -o "$1" = "po" ]
+}
+
+if hash kubectl 2>/dev/null; then
+  KUBECTL=kubectl
+elif hash kubectl.exe  2>/dev/null; then
+  KUBECTL=kubectl.exe
+else
+  echo >&2 "kubectl is not installed"
+  exit 1
+fi
+
+
+KUBECTX="${XDG_CACHE_HOME:-$HOME/.kube}/kubectx"
+KUBENS_DIR="${XDG_CACHE_HOME:-$HOME/.kube}/kubens"
+
+
+# Additional commands
+if [ "$1" = "use" ]; then
+  ## Control context
+  if [ "$2" = "context" ] || [ "$2" = "ctx" ]; then
+    if [ "$3" = "" ]; then
+      choose_context_interactive
+    elif [ "$3" = "-" ]; then
+      swap_context
+    else
+      set_context "$3"
+    fi
+
+  ## Control namespace
+  elif [ "$2" = "namespace" ] || [ "$2" = "ns" ]; then
+    if [ "$3" = "" ]; then
+      choose_namespace_interactive
+    elif [ "$3" = "-" ]; then
+      swap_namespace
+    else
+      set_namespace "$3"
+    fi
+
+  # Show usage
+  else
+    echo "show usage"
+  fi
+
+  exit
+fi
+
+if [ "$1" = "get" ]; then
+  res=($(normalize $2 $3))
+  if [ "${res[0]}" = 'context' ]; then
+    list_contexts
+    exit
+  elif [ "${res[0]}" = 'namespace' ]; then
+    list_namespaces
+    exit
+  fi
+
+  # FIXME: Consider opts like namespaces
+  if [[ "${res[1]}" =~ ^\^(.+)$ ]]; then
+    if $KUBECTL $1 "${res[0]}" | grep "^${BASH_REMATCH[1]}" > /dev/null; then
+      list="$($KUBECTL get ${res[0]} ${@:4:($#-3)})"
+      echo "${list}" | head -1
+      echo "${list}" | grep "^${BASH_REMATCH[1]}"
+    else
+      exit_err "NotFound: ${res[0]} \"^${BASH_REMATCH[1]}\""
+    fi
+    exit
+  fi
+fi
+
+if [ "$1" = "tree" ]; then
+  tree $2 $3
+  exit
+fi
+
+if [ "$1" = "child" ]; then
+  child $2 $3
+  exit
+fi
+
+if [ "$1" = "parent" ]; then
+  parent $2 $3
+  exit
+fi
+
+if [ "$1" = "sibling" ]; then
+  siblings_of $2 $3
+  exit
+fi
+
+# Shorter commands
+if [ $1 = "desc" ]; then
+  args[0]="describe"
+elif [ "$1" = "del" ]; then
+  args[0]="delete"
+elif [ "$1" = "conf" ]; then
+  args[0]="config"
+elif [ "$1" = "info" ]; then
+  args[0]="cluster-info"
+elif [ "$1" = "make" ] || [ "$1" = "mk" ]; then
+  args[0]="create"
+fi
+
+# a bit dangerous
+if [ "$2" = "dep" ]; then
+  args[1]="deployments"
+elif [[ "$2" =~ ^dep/(.+)$ ]]; then
+  args[1]="deplouyments/${BASH_MATCH[1]}"
+fi
+
+$KUBECTL "${args[@]}"
+
