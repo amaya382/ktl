@@ -150,7 +150,7 @@ You can enable these subcommands by `KTL_EXTREMELY_SHORT_COMMAND=1`
 ### Use a single wrapper script
 ```
 mkdir -p /opt/ktl
-wget ... -O /opt/ktl/ktl
+wget https://raw.githubusercontent.com/amaya382/ktl/master/ktl -O /opt/ktl/ktl
 chmod +x /opt/ktl/ktl
 sudo ln -s /opt/ktl/ktl /usr/local/bin/ktl
 ```
