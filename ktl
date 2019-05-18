@@ -42,13 +42,12 @@ switch_context() {
 
 choose_context_interactive() {
   local choice
-  choice="$(list_contexts | ${FZF} | sed -e 's/.\+ \([a-z\-]\+\) .\+/\1/' || true)"
+  choice="$(list_contexts | ${FZF} | sed -e 's/^[ \*][ \t]\+\([a-Z0-9_/-]\+\).\+$/\1/' || true)"
   if [[ -z "${choice}" ]]; then
     echo 2>&1 "error: you did not choose any of the options"
     exit 1
   else
-    echo $choice
-    #set_context "${choice}"
+    set_context "${choice}"
   fi
 }
 
@@ -418,46 +417,10 @@ KUBENS_DIR="${XDG_CACHE_HOME:-$HOME/.kube}/kubens"
 
 
 # Additional commands
-if [ "$1" = "use" ]; then
-  ## Control context
-  if [ "$2" = "context" ] || [ "$2" = "ctx" ]; then
-    if [ "$3" = "" ]; then
-      choose_context_interactive
-    elif [ "$3" = "-" ]; then
-      swap_context
-    else
-      set_context "$3"
-    fi
-
-  ## Control namespace
-  elif [ "$2" = "namespace" ] || [ "$2" = "ns" ]; then
-    if [ "$3" = "" ]; then
-      choose_namespace_interactive
-    elif [ "$3" = "-" ]; then
-      swap_namespace
-    else
-      set_namespace "$3"
-    fi
-
-  # Show usage
-  else
-    echo "show usage"
-  fi
-
-  exit
-fi
-
 if [ "$1" = "get" ]; then
   res=($(normalize $2 $3))
-  if [ "${res[0]}" = 'context' ]; then
-    list_contexts
-    exit
-  elif [ "${res[0]}" = 'namespace' ]; then
-    list_namespaces
-    exit
-  fi
 
-  # FIXME: Consider opts like namespaces
+  # FIXME: Consider opts such as `-n`
   if [[ "${res[1]}" =~ ^\^(.+)$ ]]; then
     if $KUBECTL $1 "${res[0]}" | grep "^${BASH_REMATCH[1]}" > /dev/null; then
       list="$($KUBECTL get ${res[0]} ${@:4:($#-3)})"
@@ -468,6 +431,34 @@ if [ "$1" = "get" ]; then
     fi
     exit
   fi
+fi
+
+if [ "$1" = 'context' ] || [ "$1" = 'ctx' ]; then
+  if [ $# -eq 1 ]; then
+    if [ `which fzf` ]; then
+      choose_context_interactive
+    else
+      list_contexts
+    fi
+  elif [ "$2" = "-" ]; then
+    swap_context
+  else
+    use_context "$3"
+  fi
+  exit
+elif [ "$1" = 'namespace' ] || [ "$1" = 'ns' ]; then
+  if [ $# -eq 1 ]; then
+    if [ `which fzf` ]; then
+      choose_namespace_interactive
+    else
+      list_namespaces
+    fi
+  elif [ "$2" = "-" ]; then
+    swap_namespace
+  else
+    set_namespace "$3"
+  fi
+  exit
 fi
 
 if [ "$1" = "tree" ]; then
